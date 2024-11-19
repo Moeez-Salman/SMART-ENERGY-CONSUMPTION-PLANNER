@@ -1,5 +1,6 @@
 #pragma once
 #include "Information.h"
+#include "SchedularGenerator.h"
 namespace SMR {
 
 	using namespace System;
@@ -8,7 +9,7 @@ namespace SMR {
 	using namespace System::Windows::Forms;
 	using namespace System::Data;
 	using namespace System::Drawing;
-
+	using namespace System::Data::SqlClient;
 	/// <summary>
 	/// Summary for MyForm1
 	/// </summary>
@@ -16,6 +17,10 @@ namespace SMR {
 	{
 	public:
 		Form^ obj1;
+		String^ n;
+		String^ em;
+		String^ p;
+		int no_of_app;
 		Plan(void)
 		{
 			InitializeComponent();
@@ -23,9 +28,13 @@ namespace SMR {
 			//TODO: Add the constructor code here
 			//
 		}
-		Plan(Form^ obj)
+		Plan(Form^ obj,String^ name,String^ email,String^ password,int no_of_appliances)
 		{
 			obj1 = obj;
+			n = name;
+			em = email;
+			p = password;
+			no_of_app = no_of_appliances;
 			InitializeComponent();
 			//
 			//TODO: Add the constructor code here
@@ -42,6 +51,8 @@ namespace SMR {
 				delete components;
 			}
 		}
+	public:
+		String^ conn = "Data Source=localhost\\sqlexpress;Initial Catalog=User;Integrated Security=True";
 	private: System::ComponentModel::BackgroundWorker^ backgroundWorker1;
 	protected:
 	private: System::ComponentModel::BackgroundWorker^ backgroundWorker2;
@@ -192,7 +203,131 @@ namespace SMR {
 	}
 	private: System::Void label1_Click_1(System::Object^ sender, System::EventArgs^ e) {
 	}
+private: System::Void GenerateSchedule() {
+	SqlConnection^ connect = gcnew SqlConnection(conn);
+
+	try {
+		connect->Open();
+
+		// Fetch energy rate from the database
+		String^ energyRateQuery = "SELECT Energy_Watts FROM user_data WHERE Email_phonenno = @userEmail";
+		SqlCommand^ energyRateCommand = gcnew SqlCommand(energyRateQuery, connect);
+		energyRateCommand->Parameters->AddWithValue("@userEmail", em);
+		SqlDataReader^ energyRateReader = energyRateCommand->ExecuteReader();
+
+		double energyRate = 0.0;
+		if (energyRateReader->Read()) {
+			energyRate = Convert::ToDouble(energyRateReader["Energy_Watts"]);
+		}
+		energyRateReader->Close();
+
+		// Fetch the user's monthly budget
+		String^ budgetQuery = "SELECT Budget FROM user_data WHERE Email_phonenno = @userEmail";
+		SqlCommand^ budgetCommand = gcnew SqlCommand(budgetQuery, connect);
+		budgetCommand->Parameters->AddWithValue("@userEmail", em);
+		SqlDataReader^ budgetReader = budgetCommand->ExecuteReader();
+
+		double monthlyBudget = 0.0;
+		if (budgetReader->Read()) {
+			monthlyBudget = Convert::ToDouble(budgetReader["Budget"]);
+		}
+		budgetReader->Close();
+
+		// Calculate daily budget
+		double dailyBudget = monthlyBudget / 30.0;
+
+		// Validate the number of appliances
+		if (no_of_app <= 0) {
+			MessageBox::Show("Invalid number of appliances!", "Error", MessageBoxButtons::OK);
+			return;
+		}
+
+		// Dynamically construct the SELECT query
+		String^ selectQuery = "SELECT ";
+		for (int i = 1; i <= no_of_app; i++) {
+			selectQuery += "appliance" + i.ToString() + ", ApplianceWatt" + i.ToString() + ", ApplianceTime" + i.ToString();
+			if (i != no_of_app) {
+				selectQuery += ", ";
+			}
+		}
+		selectQuery += " FROM user_data WHERE Email_phonenno = @userEmail";
+
+		SqlCommand^ selectCommand = gcnew SqlCommand(selectQuery, connect);
+		selectCommand->Parameters->AddWithValue("@userEmail", em);
+
+		SqlDataReader^ reader = selectCommand->ExecuteReader();
+
+		// Arrays to store data
+		array<String^>^ applianceNames = gcnew array<String^>(no_of_app);
+		array<int>^ wattages = gcnew array<int>(no_of_app);
+		array<int>^ runtimes = gcnew array<int>(no_of_app);
+		array<double>^ applianceCosts = gcnew array<double>(no_of_app);
+
+		int index = 0;
+		if (reader->Read()) {
+			for (int i = 1; i <= no_of_app; i++) {
+				applianceNames[index] = reader["appliance" + i.ToString()]->ToString();
+				wattages[index] = Convert::ToInt32(reader["ApplianceWatt" + i.ToString()]);
+				runtimes[index] = Convert::ToInt32(reader["ApplianceTime" + i.ToString()]);
+				index++;
+			}
+		}
+		reader->Close();
+
+		// Calculate total appliance cost
+		double totalCost = 0.0;
+		for (int i = 0; i < no_of_app; i++) {
+			double totalEnergyConsumption = (wattages[i] * runtimes[i]) / 1000.0; // kWh
+			double estimatedCost = totalEnergyConsumption * energyRate; // Estimated cost using dynamic energy rate
+			applianceCosts[i] = estimatedCost;
+			totalCost += estimatedCost;
+		}
+
+		// Check if the total cost exceeds the daily budget
+		if (totalCost > dailyBudget) {
+			// Adjust scheduled hours if total cost exceeds daily budget
+			double scalingFactor = dailyBudget / totalCost; // Calculate scaling factor
+
+			for (int i = 0; i < no_of_app; i++) {
+				double adjustedHours = runtimes[i] * scalingFactor; // Scale down the runtime
+				int scheduledHours = (int)(adjustedHours); // Convert to integer
+				// Update the database with the new scheduled hours
+				String^ updateQuery = "UPDATE user_data SET ApplianceSheduleHours" + (i + 1).ToString() + " = @scheduledHours WHERE Email_phonenno = @userEmail";
+				SqlCommand^ updateCommand = gcnew SqlCommand(updateQuery, connect);
+				updateCommand->Parameters->AddWithValue("@scheduledHours", scheduledHours);
+				updateCommand->Parameters->AddWithValue("@userEmail", em);
+				updateCommand->ExecuteNonQuery();
+			}
+		}
+		else {
+			// If within budget, use the original runtime
+			for (int i = 0; i < no_of_app; i++) {
+				String^ updateQuery = "UPDATE user_data SET ApplianceSheduleHours" + (i + 1).ToString() + " = @scheduledHours WHERE Email_phonenno = @userEmail";
+				SqlCommand^ updateCommand = gcnew SqlCommand(updateQuery, connect);
+				updateCommand->Parameters->AddWithValue("@scheduledHours", runtimes[i]);
+				updateCommand->Parameters->AddWithValue("@userEmail", em);
+				updateCommand->ExecuteNonQuery();
+			}
+		}
+
+		MessageBox::Show("Schedule generated successfully!", "Success", MessageBoxButtons::OK);
+
+		SMR::SchedularGenerator^ sg = gcnew SMR::SchedularGenerator(this,em);
+		this->Hide();
+		sg->ShowDialog();
+
+	}
+	catch (Exception^ ex) {
+		MessageBox::Show("Error: " + ex->Message, "Database Error", MessageBoxButtons::OK);
+	}
+	finally {
+		connect->Close();
+	}
+}
 	private: System::Void button2_Click(System::Object^ sender, System::EventArgs^ e) {
+
+		GenerateSchedule();
+		
 	}
 	private: System::Void label1_Click_2(System::Object^ sender, System::EventArgs^ e) {
 	}
@@ -202,7 +337,7 @@ namespace SMR {
 	}
 private: System::Void button3_Click(System::Object^ sender, System::EventArgs^ e) {
 
-	SMR::Information^ i = gcnew SMR::Information(this);
+	SMR::Information^ i = gcnew SMR::Information(this,n,em,p,no_of_app);
 	this->Hide();
 	i->ShowDialog();
 
